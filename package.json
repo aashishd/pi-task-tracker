@@ -1,0 +1,49 @@
+{
+  "name": "pi-task-tracker",
+  "version": "0.1.0",
+  "description": "Session-scoped task tracking extension for Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "task-tracker",
+    "tasks",
+    "todo"
+  ],
+  "license": "MIT",
+  "author": "Ashish Dhiman",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aashishd/pi-task-tracker.git"
+  },
+  "homepage": "https://github.com/aashishd/pi-task-tracker#readme",
+  "bugs": {
+    "url": "https://github.com/aashishd/pi-task-tracker/issues"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/task-tracker/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "check": "npm pack --dry-run",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
