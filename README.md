@@ -12,6 +12,7 @@ Pi Task List adds a session-scoped checklist widget to Pi. The agent creates, up
 - No special mode required, install the plugin and keep working normally.
 - Agent-managed progress: task creation, updates, notes, skipped items, and completed items.
 - Live widget and footer status for quick glanceability.
+- Long task lists use a rolling widget window around the first unfinished task, with earlier and later hidden task counts.
 - Section headers for same-objective follow-up work.
 - Session-aware state, resume and branch navigation keep the correct checklist.
 - Spam control: avoids checklists for simple questions and replaces stale lists instead of appending forever.
@@ -66,6 +67,8 @@ The agent is instructed to create a task list only when useful for progress trac
 - Explicit user request for progress tracking.
 
 It should not create a checklist for simple Q&A, quick explanations, one small edit, or one to two obvious actions.
+
+Task labels should be short actionable fragments, ideally 60 to 100 characters. Extra detail belongs in short update notes when needed.
 
 ## Follow-up behavior
 

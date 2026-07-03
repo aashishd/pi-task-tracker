@@ -19,7 +19,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 type TaskStatus = "pending" | "in_progress" | "done" | "blocked" | "skipped";
@@ -83,6 +83,9 @@ interface ToolDetails {
 const TOOL_NAMES = ["task_list_set", "task_list_add", "task_list_update", "task_list_get", "task_list_clear"];
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "skipped"]);
 const MIN_DETECTED_TASKS_TO_PROMPT = 3;
+const TASK_TEXT_MAX_CHARS = 100;
+const WIDGET_TASK_LIMIT = 8;
+const WIDGET_COMPLETED_CONTEXT = 3;
 
 const DEFAULT_OPTIONS: TaskTrackerOptions = {
 	enabled: true,
@@ -178,8 +181,8 @@ function cleanStepText(text: string): string {
 		.replace(/\s+/g, " ")
 		.trim();
 
-	if (cleaned.length > 160) {
-		cleaned = `${cleaned.slice(0, 157)}...`;
+	if (cleaned.length > TASK_TEXT_MAX_CHARS) {
+		cleaned = `${cleaned.slice(0, TASK_TEXT_MAX_CHARS - 3)}...`;
 	}
 	return cleaned;
 }
@@ -227,6 +230,28 @@ function sectionTitleMap(state: TaskListState): Map<number, string> {
 
 function hasTaskSections(state: TaskListState): boolean {
 	return (state.sections?.length ?? 0) > 0 && state.tasks.some((task) => task.sectionId !== undefined);
+}
+
+function getWidgetTaskWindow(tasks: TaskItem[]): { tasks: TaskItem[]; hiddenBefore: number; hiddenAfter: number } {
+	if (tasks.length <= WIDGET_TASK_LIMIT) {
+		return { tasks, hiddenBefore: 0, hiddenAfter: 0 };
+	}
+
+	const firstOpenIndex = tasks.findIndex((task) => !TERMINAL_STATUSES.has(task.status));
+	const anchorIndex = firstOpenIndex >= 0 ? firstOpenIndex : tasks.length;
+	let start = Math.max(0, anchorIndex - WIDGET_COMPLETED_CONTEXT);
+	let end = Math.min(tasks.length, start + WIDGET_TASK_LIMIT);
+
+	if (end - start < WIDGET_TASK_LIMIT) {
+		start = Math.max(0, end - WIDGET_TASK_LIMIT);
+	}
+
+	end = Math.min(tasks.length, start + WIDGET_TASK_LIMIT);
+	return {
+		tasks: tasks.slice(start, end),
+		hiddenBefore: start,
+		hiddenAfter: tasks.length - end,
+	};
 }
 
 function formatTaskList(state: TaskListState): string {
@@ -402,35 +427,52 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const lines: string[] = [];
-		const showSections = hasTaskSections(state);
-		const titles = sectionTitleMap(state);
-		let lastSectionId: number | undefined;
-		for (const task of state.tasks) {
-			if (showSections && task.sectionId !== lastSectionId) {
-				const title = task.sectionId === undefined ? undefined : titles.get(task.sectionId);
-				if (title) lines.push(ctx.ui.theme.fg("accent", `▸ ${title}`));
-				lastSectionId = task.sectionId;
-			}
+		const widgetState = cloneState(state);
+		ctx.ui.setWidget("task-tracker", (_tui, theme) => ({
+			render(width: number): string[] {
+				const lines: string[] = [];
+				const showSections = hasTaskSections(widgetState);
+				const titles = sectionTitleMap(widgetState);
+				const window = getWidgetTaskWindow(widgetState.tasks);
+				let lastSectionId: number | undefined;
 
-			const icon = statusIcon(task.status);
-			const prefix = `${icon} #${task.id} `;
-			const label = task.note ? `${task.text} (${task.note})` : task.text;
-			if (task.status === "done") {
-				lines.push(ctx.ui.theme.fg("success", prefix) + ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(label)));
-				continue;
-			}
-			if (task.status === "blocked") {
-				lines.push(ctx.ui.theme.fg("warning", prefix) + ctx.ui.theme.fg("muted", label));
-				continue;
-			}
-			if (task.status === "in_progress") {
-				lines.push(ctx.ui.theme.fg("accent", prefix) + ctx.ui.theme.fg("muted", label));
-				continue;
-			}
-			lines.push(ctx.ui.theme.fg("muted", `${prefix}${label}`));
-		}
-		ctx.ui.setWidget("task-tracker", lines);
+				if (window.hiddenBefore > 0) {
+					lines.push(theme.fg("dim", `↑ ${window.hiddenBefore} earlier task(s) hidden`));
+				}
+
+				for (const task of window.tasks) {
+					if (showSections && task.sectionId !== lastSectionId) {
+						const title = task.sectionId === undefined ? undefined : titles.get(task.sectionId);
+						if (title) lines.push(theme.fg("accent", `▸ ${title}`));
+						lastSectionId = task.sectionId;
+					}
+
+					const icon = statusIcon(task.status);
+					const prefix = `${icon} #${task.id} `;
+					const label = task.note ? `${task.text} (${task.note})` : task.text;
+					if (task.status === "done") {
+						lines.push(theme.fg("success", prefix) + theme.fg("muted", theme.strikethrough(label)));
+						continue;
+					}
+					if (task.status === "blocked") {
+						lines.push(theme.fg("warning", prefix) + theme.fg("muted", label));
+						continue;
+					}
+					if (task.status === "in_progress") {
+						lines.push(theme.fg("accent", prefix) + theme.fg("muted", label));
+						continue;
+					}
+					lines.push(theme.fg("muted", `${prefix}${label}`));
+				}
+
+				if (window.hiddenAfter > 0) {
+					lines.push(theme.fg("dim", `↓ ${window.hiddenAfter} later task(s) hidden`));
+				}
+
+				return lines.map((line) => truncateToWidth(` ${line}`, width));
+			},
+			invalidate() {},
+		}));
 	}
 
 	function syncTaskTools(ctx: ExtensionContext): void {
@@ -519,9 +561,8 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		if (!options.enabled) return undefined;
 
 		if (state.active && state.tasks.length > 0) {
-			const lifecycleLine = isComplete(state)
-				? "The active task list is complete. Do not append to it by default. For a new complex request, call task_list_set to start a fresh list, or task_list_clear if tracking is no longer useful. Only extend it when the user clearly continues the same objective, and use task_list_add with sectionTitle for the new section."
-				: "At the start of each user follow-up, decide whether this list still matches the current objective. Use task_list_set to replace an obsolete or unrelated list. Use task_list_add only for necessary work within the same objective. For a distinct phase or follow-up within the same objective, pass sectionTitle so the UI groups those tasks under a new header. Do not keep appending to a stale list across unrelated follow-ups.";
+			const objectiveScopeLine = "Treat the active task list as scoped to the current work objective, not the whole conversation. At each user follow-up, decide whether the request is same-objective, a new objective, or unrelated.\n\nKeep the list for same-objective follow-ups, small adjustments, or questions about the listed work. Use task_list_add only for new work that clearly belongs to the same objective.\n\nFor a new complex objective, use task_list_set to replace the list. For unrelated questions or when tracking is no longer useful, use task_list_clear or answer without touching the list. When unsure, do not append by default.";
+			const lifecycleLine = isComplete(state) ? `The active task list is complete. ${objectiveScopeLine}` : objectiveScopeLine;
 			const modeLine = options.execute
 				? "Work through the active task list. Call task_list_update whenever a task starts, completes, becomes blocked, or is skipped. If a listed task becomes obsolete, mark it skipped with a short note. Ask the user before expanding scope materially."
 				: "Use the active task list as planning context only in this preset. You may refine the list with task_list_add or task_list_set, but do not execute tasks unless the user switches to an executable preset or explicitly asks.";
@@ -529,7 +570,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!options.create) return undefined;
-		return `[TASK TRACKER AVAILABLE]\nBefore creating a task list, first decide whether one is actually useful. Do not create a checklist for simple Q&A, quick explanations, one small edit, or a task that is clearly one or two obvious actions. Create one only when the work is complex enough to benefit from progress tracking, for example 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or when the user asks for progress tracking. If unsure, answer directly or ask a clarifying question instead of creating a checklist. In planning-only presets, create or propose the list but do not execute it.`;
+		return `[TASK TRACKER AVAILABLE]\nBefore creating a task list, first decide whether one is actually useful. Do not create a checklist for simple Q&A, quick explanations, one small edit, or a task that is clearly one or two obvious actions. Create one only when the work is complex enough to benefit from progress tracking, for example 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or when the user asks for progress tracking. Keep task labels short, ideally 60 to 100 characters, and move details into notes only when needed. If unsure, answer directly or ask a clarifying question instead of creating a checklist. In planning-only presets, create or propose the list but do not execute it.`;
 	}
 
 	pi.registerTool({
@@ -542,10 +583,11 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			"Use task_list_set to replace an active task list when the user's request changes objective, the current list is obsolete, or a completed list should not be extended.",
 			"Do not use task_list_set for simple Q&A, quick explanations, one small edit, or one to two obvious actions.",
 			"Prefer task_list_set for 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or explicit user requests for tracking.",
+			"Keep task_list_set task labels short, ideally 60 to 100 characters, and move extra detail into follow-up notes only when needed.",
 		],
 		parameters: Type.Object({
 			title: Type.Optional(Type.String({ description: "Short task list title" })),
-			tasks: Type.Array(Type.String({ description: "Actionable task text" }), {
+			tasks: Type.Array(Type.String({ description: "Short actionable task label, ideally 60 to 100 characters" }), {
 				description: "Ordered task list items",
 			}),
 		}),
@@ -589,9 +631,10 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			"Use task_list_add with afterId, beforeId, or index to keep the checklist order accurate.",
 			"Do not use task_list_add for unrelated follow-ups or stale lists. Use task_list_set to replace the list, or task_list_clear if tracking is no longer useful.",
 			"Do not use task_list_add to expand scope silently. Ask the user first when the new task materially changes scope.",
+			"Keep task_list_add task labels short, ideally 60 to 100 characters, and move extra detail into update notes only when needed.",
 		],
 		parameters: Type.Object({
-			tasks: Type.Array(Type.String({ description: "New actionable task text" }), {
+			tasks: Type.Array(Type.String({ description: "Short actionable task label, ideally 60 to 100 characters" }), {
 				description: "One or more tasks to insert",
 			}),
 			sectionTitle: Type.Optional(Type.String({ description: "Optional section header for these tasks. Use for same-objective follow-ups or phases that need visual grouping." })),
