@@ -1,11 +1,12 @@
 /**
- * Task Tracker Extension
+ * Pi Task List Extension
  *
- * Session-scoped task list for longer Pi work.
+ * Claude Code style task list for longer Pi work.
  *
  * Features:
  * - LLM tools for creating, reading, updating, and clearing a task list
  * - TUI widget/status that updates when task tools run
+ * - Section headers for same-objective follow-up work
  * - Plan: section fallback adoption for planning responses
  * - Preset-aware enablement through presets.json taskTracker fields
  * - Session overrides through /tasks on/off and /tasks create on/off
@@ -24,17 +25,25 @@ import { Type } from "typebox";
 type TaskStatus = "pending" | "in_progress" | "done" | "blocked" | "skipped";
 type TaskTrackerPresetConfig = boolean | Partial<TaskTrackerOptions>;
 
+interface TaskSection {
+	id: number;
+	title: string;
+	createdAt: number;
+}
+
 interface TaskItem {
 	id: number;
 	text: string;
 	status: TaskStatus;
 	note?: string;
 	updatedAt: number;
+	sectionId?: number;
 }
 
 interface TaskListState {
 	active: boolean;
 	title?: string;
+	sections?: TaskSection[];
 	tasks: TaskItem[];
 	createdAt?: number;
 	updatedAt?: number;
@@ -93,6 +102,7 @@ function now(): number {
 function cloneState(state: TaskListState): TaskListState {
 	return {
 		...state,
+		sections: state.sections?.map((section) => ({ ...section })),
 		tasks: state.tasks.map((task) => ({ ...task })),
 	};
 }
@@ -155,6 +165,12 @@ function getTextContent(message: AssistantMessage): string {
 		.join("\n");
 }
 
+function cleanTitle(text: string | undefined): string | undefined {
+	const cleaned = text?.replace(/\s+/g, " ").trim();
+	if (!cleaned) return undefined;
+	return cleaned.length > 80 ? `${cleaned.slice(0, 77)}...` : cleaned;
+}
+
 function cleanStepText(text: string): string {
 	let cleaned = text
 		.replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1")
@@ -200,26 +216,57 @@ function statusIcon(status: TaskStatus): string {
 	}
 }
 
+function taskLine(task: TaskItem): string {
+	const note = task.note ? ` - ${task.note}` : "";
+	return `${statusIcon(task.status)} #${task.id} [${task.status}] ${task.text}${note}`;
+}
+
+function sectionTitleMap(state: TaskListState): Map<number, string> {
+	return new Map<number, string>((state.sections ?? []).map((section): [number, string] => [section.id, section.title]));
+}
+
+function hasTaskSections(state: TaskListState): boolean {
+	return (state.sections?.length ?? 0) > 0 && state.tasks.some((task) => task.sectionId !== undefined);
+}
+
 function formatTaskList(state: TaskListState): string {
 	if (!state.active || state.tasks.length === 0) return "No active task list.";
-	const title = state.title ? `${state.title}\n` : "";
-	const lines = state.tasks.map((task) => {
-		const note = task.note ? ` - ${task.note}` : "";
-		return `${statusIcon(task.status)} #${task.id} [${task.status}] ${task.text}${note}`;
-	});
-	return `${title}${lines.join("\n")}`;
+	const lines: string[] = [];
+	const showSections = hasTaskSections(state);
+	const titles = sectionTitleMap(state);
+
+	if (!showSections && state.title) lines.push(state.title);
+
+	let lastSectionId: number | undefined;
+	for (const task of state.tasks) {
+		if (showSections && task.sectionId !== lastSectionId) {
+			const title = task.sectionId === undefined ? undefined : titles.get(task.sectionId);
+			if (title) {
+				if (lines.length > 0) lines.push("");
+				lines.push(`▸ ${title}`);
+			}
+			lastSectionId = task.sectionId;
+		}
+		lines.push(taskLine(task));
+	}
+
+	return lines.join("\n");
 }
 
 function createStateFromTasks(params: { title?: string; tasks: string[]; source: TaskListState["source"] }): TaskListState {
 	const timestamp = now();
+	const title = cleanTitle(params.title);
+	const section: TaskSection | undefined = title ? { id: 1, title, createdAt: timestamp } : undefined;
 	return {
 		active: true,
-		title: params.title,
+		title,
+		sections: section ? [section] : undefined,
 		tasks: params.tasks.map((text, index) => ({
 			id: index + 1,
 			text: cleanStepText(text),
 			status: "pending",
 			updatedAt: timestamp,
+			sectionId: section?.id,
 		})),
 		createdAt: timestamp,
 		updatedAt: timestamp,
@@ -233,6 +280,27 @@ function isComplete(state: TaskListState): boolean {
 
 function nextTaskId(state: TaskListState): number {
 	return Math.max(0, ...state.tasks.map((task) => task.id)) + 1;
+}
+
+function nextSectionId(state: TaskListState): number {
+	return Math.max(0, ...(state.sections ?? []).map((section) => section.id), ...state.tasks.map((task) => task.sectionId ?? 0)) + 1;
+}
+
+function getOrCreateSection(state: TaskListState, title: string | undefined, timestamp: number): TaskSection | undefined {
+	const cleaned = cleanTitle(title);
+	if (!cleaned) return undefined;
+
+	if (!state.sections) state.sections = [];
+	const existing = state.sections.find((section) => section.title.toLowerCase() === cleaned.toLowerCase());
+	if (existing) return existing;
+
+	const section = { id: nextSectionId(state), title: cleaned, createdAt: timestamp };
+	state.sections.push(section);
+	return section;
+}
+
+function inferSectionId(state: TaskListState, insertAt: number): number | undefined {
+	return state.tasks[insertAt - 1]?.sectionId ?? state.tasks[insertAt]?.sectionId;
 }
 
 function getInsertIndex(
@@ -334,21 +402,34 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const lines = state.tasks.map((task) => {
+		const lines: string[] = [];
+		const showSections = hasTaskSections(state);
+		const titles = sectionTitleMap(state);
+		let lastSectionId: number | undefined;
+		for (const task of state.tasks) {
+			if (showSections && task.sectionId !== lastSectionId) {
+				const title = task.sectionId === undefined ? undefined : titles.get(task.sectionId);
+				if (title) lines.push(ctx.ui.theme.fg("accent", `▸ ${title}`));
+				lastSectionId = task.sectionId;
+			}
+
 			const icon = statusIcon(task.status);
 			const prefix = `${icon} #${task.id} `;
 			const label = task.note ? `${task.text} (${task.note})` : task.text;
 			if (task.status === "done") {
-				return ctx.ui.theme.fg("success", prefix) + ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(label));
+				lines.push(ctx.ui.theme.fg("success", prefix) + ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(label)));
+				continue;
 			}
 			if (task.status === "blocked") {
-				return ctx.ui.theme.fg("warning", prefix) + ctx.ui.theme.fg("muted", label);
+				lines.push(ctx.ui.theme.fg("warning", prefix) + ctx.ui.theme.fg("muted", label));
+				continue;
 			}
 			if (task.status === "in_progress") {
-				return ctx.ui.theme.fg("accent", prefix) + ctx.ui.theme.fg("muted", label);
+				lines.push(ctx.ui.theme.fg("accent", prefix) + ctx.ui.theme.fg("muted", label));
+				continue;
 			}
-			return ctx.ui.theme.fg("muted", `${prefix}${label}`);
-		});
+			lines.push(ctx.ui.theme.fg("muted", `${prefix}${label}`));
+		}
 		ctx.ui.setWidget("task-tracker", lines);
 	}
 
@@ -438,10 +519,13 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		if (!options.enabled) return undefined;
 
 		if (state.active && state.tasks.length > 0) {
+			const lifecycleLine = isComplete(state)
+				? "The active task list is complete. Do not append to it by default. For a new complex request, call task_list_set to start a fresh list, or task_list_clear if tracking is no longer useful. Only extend it when the user clearly continues the same objective, and use task_list_add with sectionTitle for the new section."
+				: "At the start of each user follow-up, decide whether this list still matches the current objective. Use task_list_set to replace an obsolete or unrelated list. Use task_list_add only for necessary work within the same objective. For a distinct phase or follow-up within the same objective, pass sectionTitle so the UI groups those tasks under a new header. Do not keep appending to a stale list across unrelated follow-ups.";
 			const modeLine = options.execute
-				? "Work through the active task list. Call task_list_update whenever a task starts, completes, becomes blocked, or is skipped. If you discover necessary work that is not represented, call task_list_add before doing it. If a listed task becomes obsolete, mark it skipped with a short note. Ask the user before expanding scope materially."
+				? "Work through the active task list. Call task_list_update whenever a task starts, completes, becomes blocked, or is skipped. If a listed task becomes obsolete, mark it skipped with a short note. Ask the user before expanding scope materially."
 				: "Use the active task list as planning context only in this preset. You may refine the list with task_list_add or task_list_set, but do not execute tasks unless the user switches to an executable preset or explicitly asks.";
-			return `[TASK TRACKER ACTIVE]\n${modeLine}\n\nCurrent task list:\n${formatTaskList(state)}`;
+			return `[TASK TRACKER ACTIVE]\n${modeLine}\n${lifecycleLine}\n\nCurrent task list:\n${formatTaskList(state)}`;
 		}
 
 		if (!options.create) return undefined;
@@ -455,6 +539,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Create or replace the current session task list.",
 		promptGuidelines: [
 			"Use task_list_set only after deciding the work is complex enough to benefit from progress tracking.",
+			"Use task_list_set to replace an active task list when the user's request changes objective, the current list is obsolete, or a completed list should not be extended.",
 			"Do not use task_list_set for simple Q&A, quick explanations, one small edit, or one to two obvious actions.",
 			"Prefer task_list_set for 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or explicit user requests for tracking.",
 		],
@@ -499,39 +584,50 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		description: "Add one or more newly discovered tasks to the active task list at a specific position.",
 		promptSnippet: "Add newly discovered task(s) to the active task list.",
 		promptGuidelines: [
-			"Use task_list_add when necessary work is discovered that is not represented in the active task list.",
+			"Use task_list_add when necessary work is discovered that is not represented in the active task list and still belongs to the same objective.",
+			"Use task_list_add with sectionTitle when a follow-up or new phase should be grouped under its own task-list header.",
 			"Use task_list_add with afterId, beforeId, or index to keep the checklist order accurate.",
+			"Do not use task_list_add for unrelated follow-ups or stale lists. Use task_list_set to replace the list, or task_list_clear if tracking is no longer useful.",
 			"Do not use task_list_add to expand scope silently. Ask the user first when the new task materially changes scope.",
 		],
 		parameters: Type.Object({
 			tasks: Type.Array(Type.String({ description: "New actionable task text" }), {
 				description: "One or more tasks to insert",
 			}),
+			sectionTitle: Type.Optional(Type.String({ description: "Optional section header for these tasks. Use for same-objective follow-ups or phases that need visual grouping." })),
 			index: Type.Optional(Type.Number({ description: "1-based insertion position. 1 inserts at the top. Omit to append." })),
 			beforeId: Type.Optional(Type.Number({ description: "Insert before this existing task ID" })),
 			afterId: Type.Optional(Type.Number({ description: "Insert after this existing task ID" })),
 		}),
 		prepareArguments(args) {
 			if (!args || typeof args !== "object") return args;
-			const input = args as { tasks?: unknown; task?: unknown; text?: unknown };
-			if (typeof input.tasks === "string") return { ...input, tasks: [input.tasks] };
-			if (input.tasks === undefined && typeof input.task === "string") return { ...input, tasks: [input.task] };
-			if (input.tasks === undefined && typeof input.text === "string") return { ...input, tasks: [input.text] };
-			return args;
+			const input = args as { tasks?: unknown; task?: unknown; text?: unknown; section?: unknown; sectionTitle?: unknown };
+			let next = input;
+			if (input.sectionTitle === undefined && typeof input.section === "string") next = { ...next, sectionTitle: input.section };
+			if (typeof next.tasks === "string") return { ...next, tasks: [next.tasks] };
+			if (next.tasks === undefined && typeof next.task === "string") return { ...next, tasks: [next.task] };
+			if (next.tasks === undefined && typeof next.text === "string") return { ...next, tasks: [next.text] };
+			return next;
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			ensureEnabledForTool(ctx, "create");
 			if (!state.active || state.tasks.length === 0) throw new Error("No active task list. Use task_list_set first.");
 			if (!params.tasks || params.tasks.length === 0) throw new Error("task_list_add requires at least one task.");
+			if (isComplete(state) && !cleanTitle(params.sectionTitle)) {
+				throw new Error("The active task list is complete. Use task_list_set for a new objective, or provide sectionTitle to extend the same objective with a new section.");
+			}
 
 			const insertAt = getInsertIndex(state, params);
 			const timestamp = now();
+			const section = getOrCreateSection(state, params.sectionTitle, timestamp);
+			const sectionId = section?.id ?? inferSectionId(state, insertAt);
 			const firstId = nextTaskId(state);
 			const additions: TaskItem[] = params.tasks.map((text, offset) => ({
 				id: firstId + offset,
 				text: cleanStepText(text),
 				status: "pending",
 				updatedAt: timestamp,
+				sectionId,
 			}));
 			state.tasks.splice(insertAt, 0, ...additions);
 			state.updatedAt = timestamp;
@@ -542,7 +638,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text" as const,
-						text: `Added ${additions.length} task(s) at position ${insertAt + 1}. New task IDs: ${additions.map((task) => `#${task.id}`).join(", ")}.`,
+						text: `Added ${additions.length} task(s) at position ${insertAt + 1}. New task IDs: ${additions.map((task) => `#${task.id}`).join(", ")}.${section ? ` Section: ${section.title}.` : ""}`,
 					},
 				],
 				details: detailsFromState("add", state),
@@ -551,9 +647,10 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		renderCall(args, theme) {
 			const count = Array.isArray(args.tasks) ? args.tasks.length : 0;
 			const position = args.afterId !== undefined ? `after #${args.afterId}` : args.beforeId !== undefined ? `before #${args.beforeId}` : args.index !== undefined ? `at ${args.index}` : "append";
+			const section = typeof args.sectionTitle === "string" && args.sectionTitle.trim() ? `, section ${args.sectionTitle.trim()}` : "";
 			return new Text(
 				theme.fg("toolTitle", theme.bold("task_list_add ")) +
-					theme.fg("muted", `${count} task(s), ${position}`),
+					theme.fg("muted", `${count} task(s), ${position}${section}`),
 				0,
 				0,
 			);
@@ -641,8 +738,18 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			const details = result.details as ToolDetails | undefined;
 			if (!details?.state.active) return new Text(theme.fg("dim", "No active task list"), 0, 0);
 			const tasks = expanded ? details.state.tasks : details.state.tasks.slice(0, 6);
+			const showSections = hasTaskSections(details.state);
+			const titles = sectionTitleMap(details.state);
+			let lastSectionId: number | undefined;
 			let text = theme.fg("muted", `${details.state.tasks.length} task(s):`);
-			for (const task of tasks) text += `\n${statusIcon(task.status)} ${theme.fg("accent", `#${task.id}`)} ${theme.fg("muted", task.text)}`;
+			for (const task of tasks) {
+				if (showSections && task.sectionId !== lastSectionId) {
+					const title = task.sectionId === undefined ? undefined : titles.get(task.sectionId);
+					if (title) text += `\n${theme.fg("accent", `▸ ${title}`)}`;
+					lastSectionId = task.sectionId;
+				}
+				text += `\n${statusIcon(task.status)} ${theme.fg("accent", `#${task.id}`)} ${theme.fg("muted", task.text)}`;
+			}
 			if (!expanded && details.state.tasks.length > tasks.length) text += `\n${theme.fg("dim", `... ${details.state.tasks.length - tasks.length} more`)}`;
 			return new Text(text, 0, 0);
 		},
@@ -772,7 +879,8 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 
 	pi.on("agent_end", async (event, ctx) => {
 		const options = getOptions(ctx);
-		if (!options.enabled || !options.create || state.active) return;
+		if (!options.enabled || !options.create) return;
+		if (state.active && !isComplete(state)) return;
 
 		const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
 		const tasks = lastAssistant ? extractPlanTasks(getTextContent(lastAssistant)) : [];
@@ -784,11 +892,12 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!options.promptToAdopt) return;
+		const adoptLabel = state.active ? "Replace completed task list" : "Adopt task list";
 		const choice = await ctx.ui.select("Task tracker detected a Plan: checklist", [
-			"Adopt task list",
+			adoptLabel,
 			"Ignore this checklist",
 		]);
-		if (choice?.startsWith("Adopt")) {
+		if (choice === adoptLabel) {
 			setState(createStateFromTasks({ tasks, source: "detected-plan" }), ctx, true);
 			ctx.ui.notify(`Adopted ${tasks.length} task(s). Use /tasks to view or clear.`, "info");
 		}

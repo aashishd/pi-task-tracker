@@ -1,30 +1,32 @@
-# Pi Task Tracker
+# Pi Task List
 
-Purpose: a Pi extension package that adds session-scoped task tracking for longer, multi-step agent work.
+Intent: Claude Code style task lists for Pi, implicitly managed by the agent so you can glance at progress without switching into a dedicated plan mode.
 
-## Features
+Pi Task List adds a session-scoped checklist widget to Pi. The agent creates, updates, and clears tasks when useful for longer work. It works in your normal Pi workflow, including automatic write mode, plan-heavy prompts, debugging loops, and follow-up requests.
 
-- Adds task tools for the agent:
-  - `task_list_set`
-  - `task_list_add`
-  - `task_list_update`
-  - `task_list_get`
-  - `task_list_clear`
-- Shows a live task widget and footer status.
-- Keeps task state in the Pi session, so resume and branch navigation keep the right checklist.
-- Supports preset-level enablement through `presets.json`.
-- Avoids task-list spam by only creating lists for non-trivial work.
+![Pi Task List preview](assets/pi-task-list-preview.png)
+
+## Why use it
+
+- Claude Code style task list inside Pi.
+- No special mode required, install the plugin and keep working normally.
+- Agent-managed progress: task creation, updates, notes, skipped items, and completed items.
+- Live widget and footer status for quick glanceability.
+- Section headers for same-objective follow-up work.
+- Session-aware state, resume and branch navigation keep the correct checklist.
+- Spam control: avoids checklists for simple questions and replaces stale lists instead of appending forever.
+- Easy opt-out with `/tasks off`, `/tasks create off`, preset config, or `pi remove`.
 
 ## Install
 
 ```bash
-pi install npm:pi-task-tracker
+pi install npm:@thunstack/pi-task-list
 ```
 
 Try without installing:
 
 ```bash
-pi -e npm:pi-task-tracker
+pi -e npm:@thunstack/pi-task-list
 ```
 
 Install from GitHub before npm publish:
@@ -33,31 +35,55 @@ Install from GitHub before npm publish:
 pi install git:github.com/aashishd/pi-task-tracker
 ```
 
-## Commands
+## What it adds
 
-- `/tasks` or `/tasks status`: show current task list
-- `/tasks adopt`: adopt the latest assistant `Plan:` checklist
-- `/tasks clear`: clear current task list
-- `/tasks off` / `/tasks on`: disable or enable task tracker for this session
-- `/tasks create off` / `/tasks create on`: disable or enable new task-list creation for this session
-- `/todos`: alias for `/tasks`
+Agent tools:
+
+- `task_list_set`: create or replace the active task list.
+- `task_list_add`: add same-objective follow-up tasks, optionally under a section header.
+- `task_list_update`: mark one task as pending, in progress, done, blocked, or skipped.
+- `task_list_get`: read the active list.
+- `task_list_clear`: clear obsolete tracking.
+
+Commands:
+
+- `/tasks` or `/tasks status`: show current task list.
+- `/tasks adopt`: adopt the latest assistant `Plan:` checklist.
+- `/tasks clear`: clear current task list.
+- `/tasks off` / `/tasks on`: disable or enable task tracking for this session.
+- `/tasks create off` / `/tasks create on`: disable or enable new task-list creation for this session.
+- `/todos`: alias for `/tasks`.
 
 ## Checklist threshold
 
-The agent is instructed to create a task list only when it is useful for progress tracking, such as:
+The agent is instructed to create a task list only when useful for progress tracking, such as:
 
-- 3+ meaningful steps
-- multiple files or phases
-- debugging or research loops
-- validation passes
-- subagent workflows
-- explicit user request for progress tracking
+- 3+ meaningful steps.
+- Multiple files or phases.
+- Debugging or research loops.
+- Validation passes.
+- Subagent workflows.
+- Explicit user request for progress tracking.
 
 It should not create a checklist for simple Q&A, quick explanations, one small edit, or one to two obvious actions.
 
-## Preset config
+## Follow-up behavior
 
-Add `taskTracker` to a preset in `presets.json`:
+- New unrelated objective: replace the active list with `task_list_set` instead of appending.
+- Same objective, new phase: add tasks with `task_list_add` and `sectionTitle` so the UI shows a new header.
+- Completed list: do not append by default. Start a fresh list unless the user clearly extends the same objective.
+
+## Disable or tune
+
+Temporary session controls:
+
+```bash
+/tasks off
+/tasks create off
+/tasks clear
+```
+
+Preset-level config in `presets.json`:
 
 ```json
 {
@@ -79,12 +105,18 @@ Add `taskTracker` to a preset in `presets.json`:
 
 Options:
 
-- `enabled`: activate task-tracker tools and prompt context for this preset.
+- `enabled`: activate task-list tools and prompt context for this preset.
 - `create`: allow the agent or detected plans to create new task lists and new task items.
 - `execute`: allow progress updates with `task_list_update` in this preset.
 - `autoAdopt`: adopt detected `Plan:` checklists without asking.
 - `promptToAdopt`: ask before adopting detected `Plan:` checklists.
 - `showWidget`: show or hide the live checklist widget.
+
+Uninstall:
+
+```bash
+pi remove npm:@thunstack/pi-task-list
+```
 
 ## Attribution
 
