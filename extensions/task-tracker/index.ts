@@ -232,25 +232,54 @@ function hasTaskSections(state: TaskListState): boolean {
 	return (state.sections?.length ?? 0) > 0 && state.tasks.some((task) => task.sectionId !== undefined);
 }
 
+function getWidgetAnchorIndex(tasks: TaskItem[]): number {
+	const firstActiveIndex = tasks.findIndex((task) => task.status === "pending" || task.status === "in_progress");
+	if (firstActiveIndex >= 0) return firstActiveIndex;
+
+	const firstBlockedIndex = tasks.findIndex((task) => task.status === "blocked");
+	return firstBlockedIndex >= 0 ? firstBlockedIndex : tasks.length;
+}
+
+function getWidgetWindowBounds(taskCount: number, anchorIndex: number, limit: number): { start: number; end: number } {
+	if (limit <= 0) {
+		const index = Math.min(anchorIndex, taskCount);
+		return { start: index, end: index };
+	}
+
+	let start = Math.max(0, anchorIndex - WIDGET_COMPLETED_CONTEXT);
+	let end = Math.min(taskCount, start + limit);
+
+	if (end - start < limit) {
+		start = Math.max(0, end - limit);
+	}
+
+	end = Math.min(taskCount, start + limit);
+	return { start, end };
+}
+
 function getWidgetTaskWindow(tasks: TaskItem[]): { tasks: TaskItem[]; hiddenBefore: number; hiddenAfter: number } {
 	if (tasks.length <= WIDGET_TASK_LIMIT) {
 		return { tasks, hiddenBefore: 0, hiddenAfter: 0 };
 	}
 
-	const firstOpenIndex = tasks.findIndex((task) => !TERMINAL_STATUSES.has(task.status));
-	const anchorIndex = firstOpenIndex >= 0 ? firstOpenIndex : tasks.length;
-	let start = Math.max(0, anchorIndex - WIDGET_COMPLETED_CONTEXT);
-	let end = Math.min(tasks.length, start + WIDGET_TASK_LIMIT);
+	const anchorIndex = getWidgetAnchorIndex(tasks);
+	let normalLimit = WIDGET_TASK_LIMIT;
+	let bounds = getWidgetWindowBounds(tasks.length, anchorIndex, normalLimit);
+	let blockedBefore = tasks.slice(0, bounds.start).filter((task) => task.status === "blocked");
 
-	if (end - start < WIDGET_TASK_LIMIT) {
-		start = Math.max(0, end - WIDGET_TASK_LIMIT);
+	while (true) {
+		const nextNormalLimit = Math.max(0, WIDGET_TASK_LIMIT - blockedBefore.length);
+		if (nextNormalLimit === normalLimit) break;
+
+		normalLimit = nextNormalLimit;
+		bounds = getWidgetWindowBounds(tasks.length, anchorIndex, normalLimit);
+		blockedBefore = tasks.slice(0, bounds.start).filter((task) => task.status === "blocked");
 	}
 
-	end = Math.min(tasks.length, start + WIDGET_TASK_LIMIT);
 	return {
-		tasks: tasks.slice(start, end),
-		hiddenBefore: start,
-		hiddenAfter: tasks.length - end,
+		tasks: [...blockedBefore, ...tasks.slice(bounds.start, bounds.end)],
+		hiddenBefore: bounds.start - blockedBefore.length,
+		hiddenAfter: tasks.length - bounds.end,
 	};
 }
 
