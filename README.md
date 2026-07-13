@@ -15,6 +15,7 @@ Pi Task List adds a session-scoped checklist widget to Pi. The agent creates, up
 - Long task lists use a rolling widget window around the first unfinished task, with earlier and later hidden task counts.
 - Section headers for same-objective follow-up work.
 - Session-aware state, resume and branch navigation keep the correct checklist.
+- Manual `/compact` clears the active task list before compaction runs.
 - Spam control: avoids checklists for simple questions and replaces stale lists instead of appending forever.
 - Easy opt-out with `/tasks off`, `/tasks create off`, preset config, or `pi remove`.
 
@@ -68,12 +69,13 @@ The agent is instructed to create a task list only when useful for progress trac
 
 It should not create a checklist for simple Q&A, quick explanations, one small edit, or one to two obvious actions.
 
-Task labels should be short actionable fragments, ideally 60 to 100 characters. Extra detail belongs in short update notes when needed.
+Task labels must contain 3 to 15 whitespace-separated words. Extra detail belongs in short update notes when needed.
 
 ## Follow-up behavior
 
 - New unrelated objective: replace the active list with `task_list_set` instead of appending.
 - Same objective, new phase: add tasks with `task_list_add` and `sectionTitle` so the UI shows a new header.
+- At most two follow-up lists may be added to one active list. A third `task_list_add` call clears the list instead.
 - Completed list: do not append by default. Start a fresh list unless the user clearly extends the same objective.
 
 ## Disable or tune

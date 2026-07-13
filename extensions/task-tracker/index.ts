@@ -21,6 +21,15 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+	hasValidTaskWordCount,
+	MAX_FOLLOW_UP_LISTS,
+	MAX_TASK_WORDS,
+	MIN_TASK_WORDS,
+	shouldClearForCompaction,
+	shouldClearForFollowUpLimit,
+	validateTaskWordCounts,
+} from "./rules.ts";
 
 type TaskStatus = "pending" | "in_progress" | "done" | "blocked" | "skipped";
 type TaskTrackerPresetConfig = boolean | Partial<TaskTrackerOptions>;
@@ -48,6 +57,7 @@ interface TaskListState {
 	createdAt?: number;
 	updatedAt?: number;
 	completedAt?: number;
+	followUpListsCreated?: number;
 	source?: "tool" | "detected-plan" | "command" | "legacy-plan-mode";
 }
 
@@ -83,7 +93,6 @@ interface ToolDetails {
 const TOOL_NAMES = ["task_list_set", "task_list_add", "task_list_update", "task_list_get", "task_list_clear"];
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "skipped"]);
 const MIN_DETECTED_TASKS_TO_PROMPT = 3;
-const TASK_TEXT_MAX_CHARS = 100;
 const WIDGET_TASK_LIMIT = 8;
 const WIDGET_COMPLETED_CONTEXT = 3;
 
@@ -175,15 +184,12 @@ function cleanTitle(text: string | undefined): string | undefined {
 }
 
 function cleanStepText(text: string): string {
-	let cleaned = text
+	const cleaned = text
 		.replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1")
 		.replace(/`([^`]+)`/g, "$1")
 		.replace(/\s+/g, " ")
 		.trim();
 
-	if (cleaned.length > TASK_TEXT_MAX_CHARS) {
-		cleaned = `${cleaned.slice(0, TASK_TEXT_MAX_CHARS - 3)}...`;
-	}
 	return cleaned;
 }
 
@@ -197,7 +203,7 @@ function extractPlanTasks(message: string): string[] {
 
 	for (const match of planSection.matchAll(numberedPattern)) {
 		const text = cleanStepText(match[2].replace(/\*{1,2}$/, "").trim());
-		if (text.length > 5 && !text.startsWith("/") && !text.startsWith("`")) {
+		if (hasValidTaskWordCount(text) && !text.startsWith("/") && !text.startsWith("`")) {
 			tasks.push(text);
 		}
 	}
@@ -310,20 +316,23 @@ function formatTaskList(state: TaskListState): string {
 function createStateFromTasks(params: { title?: string; tasks: string[]; source: TaskListState["source"] }): TaskListState {
 	const timestamp = now();
 	const title = cleanTitle(params.title);
+	const taskTexts = params.tasks.map(cleanStepText);
+	validateTaskWordCounts(taskTexts);
 	const section: TaskSection | undefined = title ? { id: 1, title, createdAt: timestamp } : undefined;
 	return {
 		active: true,
 		title,
 		sections: section ? [section] : undefined,
-		tasks: params.tasks.map((text, index) => ({
+		tasks: taskTexts.map((text, index) => ({
 			id: index + 1,
-			text: cleanStepText(text),
+			text,
 			status: "pending",
 			updatedAt: timestamp,
 			sectionId: section?.id,
 		})),
 		createdAt: timestamp,
 		updatedAt: timestamp,
+		followUpListsCreated: 0,
 		source: params.source,
 	};
 }
@@ -547,17 +556,21 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			if (entry.type === "custom" && entry.customType === "plan-mode") {
 				const data = entry.data as { todos?: Array<{ step?: number; text: string; completed: boolean }>; executing?: boolean } | undefined;
 				if (!state.active && data?.executing && data.todos && data.todos.length > 0) {
+					const legacyTasks = data.todos.map((todo) => ({ todo, text: cleanStepText(todo.text) }));
+					if (!legacyTasks.every(({ text }) => hasValidTaskWordCount(text))) continue;
+
 					const timestamp = now();
 					state = {
 						active: true,
-						tasks: data.todos.map((todo, index) => ({
+						tasks: legacyTasks.map(({ todo, text }, index) => ({
 							id: todo.step ?? index + 1,
-							text: todo.text,
+							text,
 							status: todo.completed ? "done" : "pending",
 							updatedAt: timestamp,
 						})),
 						createdAt: timestamp,
 						updatedAt: timestamp,
+						followUpListsCreated: 0,
 						source: "legacy-plan-mode",
 					};
 				}
@@ -590,7 +603,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		if (!options.enabled) return undefined;
 
 		if (state.active && state.tasks.length > 0) {
-			const objectiveScopeLine = "Treat the active task list as scoped to the current work objective, not the whole conversation. At each user follow-up, decide whether the request is same-objective, a new objective, or unrelated.\n\nKeep the list for same-objective follow-ups, small adjustments, or questions about the listed work. Use task_list_add only for new work that clearly belongs to the same objective.\n\nFor a new complex objective, use task_list_set to replace the list. For unrelated questions or when tracking is no longer useful, use task_list_clear or answer without touching the list. When unsure, do not append by default.";
+			const objectiveScopeLine = `Treat the active task list as scoped to the current work objective, not the whole conversation. At each user follow-up, decide whether the request is same-objective, a new objective, or unrelated.\n\nKeep the list for same-objective follow-ups, small adjustments, or questions about the listed work. Use task_list_add only for new work that clearly belongs to the same objective. At most ${MAX_FOLLOW_UP_LISTS} follow-up lists may be added; a third task_list_add call clears the active list instead.\n\nFor a new complex objective, use task_list_set to replace the list. For unrelated questions or when tracking is no longer useful, use task_list_clear or answer without touching the list. When unsure, do not append by default.`;
 			const lifecycleLine = isComplete(state) ? `The active task list is complete. ${objectiveScopeLine}` : objectiveScopeLine;
 			const modeLine = options.execute
 				? "Work through the active task list. Call task_list_update whenever a task starts, completes, becomes blocked, or is skipped. If a listed task becomes obsolete, mark it skipped with a short note. Ask the user before expanding scope materially."
@@ -599,7 +612,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!options.create) return undefined;
-		return `[TASK TRACKER AVAILABLE]\nBefore creating a task list, first decide whether one is actually useful. Do not create a checklist for simple Q&A, quick explanations, one small edit, or a task that is clearly one or two obvious actions. Create one only when the work is complex enough to benefit from progress tracking, for example 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or when the user asks for progress tracking. Keep task labels short, ideally 60 to 100 characters, and move details into notes only when needed. If unsure, answer directly or ask a clarifying question instead of creating a checklist. In planning-only presets, create or propose the list but do not execute it.`;
+		return `[TASK TRACKER AVAILABLE]\nBefore creating a task list, first decide whether one is actually useful. Do not create a checklist for simple Q&A, quick explanations, one small edit, or a task that is clearly one or two obvious actions. Create one only when the work is complex enough to benefit from progress tracking, for example 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or when the user asks for progress tracking. Each task label must contain ${MIN_TASK_WORDS} to ${MAX_TASK_WORDS} words. Move extra detail into notes when needed. If unsure, answer directly or ask a clarifying question instead of creating a checklist. In planning-only presets, create or propose the list but do not execute it.`;
 	}
 
 	pi.registerTool({
@@ -612,11 +625,11 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			"Use task_list_set to replace an active task list when the user's request changes objective, the current list is obsolete, or a completed list should not be extended.",
 			"Do not use task_list_set for simple Q&A, quick explanations, one small edit, or one to two obvious actions.",
 			"Prefer task_list_set for 3+ meaningful steps, multiple files or phases, debugging/research loops, validation passes, subagent workflows, or explicit user requests for tracking.",
-			"Keep task_list_set task labels short, ideally 60 to 100 characters, and move extra detail into follow-up notes only when needed.",
+			`Keep every task_list_set label between ${MIN_TASK_WORDS} and ${MAX_TASK_WORDS} words, and move extra detail into follow-up notes when needed.`,
 		],
 		parameters: Type.Object({
 			title: Type.Optional(Type.String({ description: "Short task list title" })),
-			tasks: Type.Array(Type.String({ description: "Short actionable task label, ideally 60 to 100 characters" }), {
+			tasks: Type.Array(Type.String({ description: `Short actionable task label containing ${MIN_TASK_WORDS} to ${MAX_TASK_WORDS} words` }), {
 				description: "Ordered task list items",
 			}),
 		}),
@@ -660,10 +673,11 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			"Use task_list_add with afterId, beforeId, or index to keep the checklist order accurate.",
 			"Do not use task_list_add for unrelated follow-ups or stale lists. Use task_list_set to replace the list, or task_list_clear if tracking is no longer useful.",
 			"Do not use task_list_add to expand scope silently. Ask the user first when the new task materially changes scope.",
-			"Keep task_list_add task labels short, ideally 60 to 100 characters, and move extra detail into update notes only when needed.",
+			`Keep every task_list_add label between ${MIN_TASK_WORDS} and ${MAX_TASK_WORDS} words, and move extra detail into update notes when needed.`,
+			`Do not call task_list_add more than ${MAX_FOLLOW_UP_LISTS} times for one active list; a third call clears that list instead.`,
 		],
 		parameters: Type.Object({
-			tasks: Type.Array(Type.String({ description: "Short actionable task label, ideally 60 to 100 characters" }), {
+			tasks: Type.Array(Type.String({ description: `Short actionable task label containing ${MIN_TASK_WORDS} to ${MAX_TASK_WORDS} words` }), {
 				description: "One or more tasks to insert",
 			}),
 			sectionTitle: Type.Optional(Type.String({ description: "Optional section header for these tasks. Use for same-objective follow-ups or phases that need visual grouping." })),
@@ -684,19 +698,29 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			ensureEnabledForTool(ctx, "create");
 			if (!state.active || state.tasks.length === 0) throw new Error("No active task list. Use task_list_set first.");
+			if (shouldClearForFollowUpLimit(state.followUpListsCreated)) {
+				const previousCount = state.tasks.length;
+				clearState(ctx);
+				return {
+					content: [{ type: "text" as const, text: `Follow-up limit reached. Cleared ${previousCount} task(s) instead of creating a third follow-up list.` }],
+					details: detailsFromState("clear", state),
+				};
+			}
 			if (!params.tasks || params.tasks.length === 0) throw new Error("task_list_add requires at least one task.");
 			if (isComplete(state) && !cleanTitle(params.sectionTitle)) {
 				throw new Error("The active task list is complete. Use task_list_set for a new objective, or provide sectionTitle to extend the same objective with a new section.");
 			}
 
+			const taskTexts = params.tasks.map(cleanStepText);
+			validateTaskWordCounts(taskTexts);
 			const insertAt = getInsertIndex(state, params);
 			const timestamp = now();
 			const section = getOrCreateSection(state, params.sectionTitle, timestamp);
 			const sectionId = section?.id ?? inferSectionId(state, insertAt);
 			const firstId = nextTaskId(state);
-			const additions: TaskItem[] = params.tasks.map((text, offset) => ({
+			const additions: TaskItem[] = taskTexts.map((text, offset) => ({
 				id: firstId + offset,
-				text: cleanStepText(text),
+				text,
 				status: "pending",
 				updatedAt: timestamp,
 				sectionId,
@@ -704,6 +728,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 			state.tasks.splice(insertAt, 0, ...additions);
 			state.updatedAt = timestamp;
 			state.completedAt = undefined;
+			state.followUpListsCreated = (state.followUpListsCreated ?? 0) + 1;
 			updateUi(ctx);
 
 			return {
@@ -926,6 +951,10 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		reconstructState(ctx);
 		syncTaskTools(ctx);
 		updateUi(ctx);
+	});
+
+	pi.on("session_before_compact", async (event, ctx) => {
+		if (shouldClearForCompaction(event.reason)) clearState(ctx, true);
 	});
 
 	pi.on("input", async (event, ctx) => {
