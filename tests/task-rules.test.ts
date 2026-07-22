@@ -36,8 +36,7 @@ test("clears when a third follow-up list would be created", () => {
 	assert.equal(shouldClearForFollowUpLimit(3), true);
 });
 
-test("clears only for manual compaction", () => {
-	assert.equal(shouldClearForCompaction("manual"), true);
-	assert.equal(shouldClearForCompaction("threshold"), false);
-	assert.equal(shouldClearForCompaction("overflow"), false);
+test("clears completed lists for every compaction trigger", () => {
+	assert.equal(shouldClearForCompaction(true), true);
+	assert.equal(shouldClearForCompaction(false), false);
 });

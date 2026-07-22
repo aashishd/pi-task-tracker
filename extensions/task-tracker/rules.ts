@@ -27,6 +27,6 @@ export function shouldClearForFollowUpLimit(followUpListsCreated: number | undef
 	return (followUpListsCreated ?? 0) >= MAX_FOLLOW_UP_LISTS;
 }
 
-export function shouldClearForCompaction(reason: "manual" | "threshold" | "overflow"): boolean {
-	return reason === "manual";
+export function shouldClearForCompaction(listComplete: boolean): boolean {
+	return listComplete;
 }

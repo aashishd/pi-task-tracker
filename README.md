@@ -12,10 +12,11 @@ Pi Task List adds a session-scoped checklist widget to Pi. The agent creates, up
 - No special mode required, install the plugin and keep working normally.
 - Agent-managed progress: task creation, updates, notes, skipped items, and completed items.
 - Live widget and footer status for quick glanceability.
+- Long task labels wrap onto continuation lines instead of ending with a truncation ellipsis.
 - Long task lists use a rolling widget window around the first unfinished task, with earlier and later hidden task counts.
 - Section headers for same-objective follow-up work.
 - Session-aware state, resume and branch navigation keep the correct checklist.
-- Manual `/compact` clears the active task list before compaction runs.
+- Compaction clears a fully completed task list while preserving unfinished lists and their sections, regardless of trigger.
 - Spam control: avoids checklists for simple questions and replaces stale lists instead of appending forever.
 - Easy opt-out with `/tasks off`, `/tasks create off`, preset config, or `pi remove`.
 

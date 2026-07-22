@@ -19,8 +19,9 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { wrapWidgetLines } from "./rendering.ts";
 import {
 	hasValidTaskWordCount,
 	MAX_FOLLOW_UP_LISTS,
@@ -507,7 +508,7 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 					lines.push(theme.fg("dim", `↓ ${window.hiddenAfter} later task(s) hidden`));
 				}
 
-				return lines.map((line) => truncateToWidth(` ${line}`, width));
+				return wrapWidgetLines(lines, width, wrapTextWithAnsi);
 			},
 			invalidate() {},
 		}));
@@ -953,8 +954,8 @@ export default function taskTrackerExtension(pi: ExtensionAPI): void {
 		updateUi(ctx);
 	});
 
-	pi.on("session_before_compact", async (event, ctx) => {
-		if (shouldClearForCompaction(event.reason)) clearState(ctx, true);
+	pi.on("session_before_compact", async (_event, ctx) => {
+		if (shouldClearForCompaction(isComplete(state))) clearState(ctx, true);
 	});
 
 	pi.on("input", async (event, ctx) => {
